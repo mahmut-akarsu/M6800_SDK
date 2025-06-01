@@ -7,272 +7,214 @@ class ParsedInstruction:
     Sözdizimi analizinden geçmiş bir komutu veya direktifi temsil eder.
     Adresleme modu, çözümlenmiş operandlar gibi ek bilgiler içerir.
     """
-    def __init__(self, token, is_directive=False, mnemonic=None, addressing_mode=None, operands=None, op_info=None, error=None):
+    def __init__(self, token, is_directive=False, mnemonic=None, addressing_mode=None, operands=None, op_info=None, error=None, address=0): # address eklendi
         self.token = token # Orijinal Token nesnesi
         self.is_directive = is_directive
         self.mnemonic = mnemonic.upper() if mnemonic else (token.mnemonic.upper() if token.mnemonic else None)
         self.addressing_mode = addressing_mode
-        self.operands = operands if operands is not None else [] # [(type, value), ...]
+        self.operands = operands if operands is not None else [] # [(type, value), ...] veya direkt değer listesi
         self.op_info = op_info # opcode_table'dan gelen instruction/directive bilgisi
         self.error = error # Eğer syntax hatası varsa
+        self.address = address # Komutun/direktifin Pass 1'deki adresi
 
     def __repr__(self):
-        return (f"ParsedInstruction(Mnem='{self.mnemonic}', Mode='{self.addressing_mode}', "
-                f"Ops={self.operands}, Err='{self.error}', OrigToken={self.token})")
+        return (f"ParsedInstruction(Addr={self.address:04X}, Mnem='{self.mnemonic}', Mode='{self.addressing_mode}', "
+                f"Ops={self.operands}, Err='{self.error}', Orig='{self.token.original_line}')")
 
 class SyntaxAnalyzer:
     def __init__(self, opcode_table_module):
-        self.opcode_table = opcode_table_module
-        # Operandları ayrıştırmak için regex'ler
-        # Anında (Immediate): #$xx, #%bb, #dd, #'c'
-        self.imm_regex = re.compile(r"^#(?:\$([0-9A-Fa-f]{1,2})|%([01]{1,8})|(\d{1,3})|'(.)')$") # Hex, Binary, Decimal, Char
-        # İndeksli (Indexed): offset,X  (offset 0-255 arası bir byte)
-        self.idx_regex = re.compile(r"^(?:\$([0-9A-Fa-f]{1,2})|(\d{1,3})),\s*X$", re.IGNORECASE) # Hex offset, Decimal offset
-        # Doğrudan (Direct) veya Genişletilmiş (Extended) veya Etiket: $xx, $xxxx, LABEL
-        # Direct: $00-$FF (1 byte adres), Extended: $0100-$FFFF (2 byte adres)
-        # Etiketler alfanumerik
-        self.addr_label_regex = re.compile(r"^(?:\$([0-9A-Fa-f]{1,4})|([a-zA-Z_][a-zA-Z0-9_]*))$")
+        self.opcode_table = opcode_table_module # opcode_table.py modülünün kendisi
+        # Regex tanımları
+        self.imm_regex = re.compile(r"^#(?:\$([0-9A-Fa-f]{1,2})|%([01]{1,8})|(\d{1,3})|'(.)')$")
+        self.idx_regex = re.compile(r"^(?:\$([0-9A-Fa-f]{1,2})|(\d{1,3})),\s*X$", re.IGNORECASE)
+        self.hex_addr_regex = re.compile(r"^\$([0-9A-Fa-f]{1,4})$")
+        self.label_regex = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)$")
+        self.dec_num_regex = re.compile(r"^(\d+)$")
 
-        # FCB/FDB için değerleri ayırma
         self.value_list_regex = re.compile(r"\s*,\s*")
 
 
     def _parse_operand_value(self, operand_str):
-        """
-        Verilen operand string'ini (örn: #$0A, $10, LOOP) sayısal değere veya etiket adına çevirmeye çalışır.
-        Döndürülen değer: (type, value) tuple'ı. type: 'hex', 'dec', 'bin', 'char', 'label'
-        """
         operand_str = operand_str.strip()
 
-        # Anında Değerler
+        # 1. Anında Değerler (# ile başlar)
         m_imm = self.imm_regex.match(operand_str)
         if m_imm:
-            if m_imm.group(1): # Hex
-                return 'imm_hex', int(m_imm.group(1), 16)
-            elif m_imm.group(2): # Binary
-                return 'imm_bin', int(m_imm.group(2), 2)
-            elif m_imm.group(3): # Decimal
-                val = int(m_imm.group(3))
-                if not (0 <= val <= 255): # M6800 immediate genellikle 1 byte
-                     # print(f"Warning: Immediate decimal value {val} out of 8-bit range.") # Ya da hata
-                     pass
-                return 'imm_dec', val
-            elif m_imm.group(4): # Character
-                return 'imm_char', ord(m_imm.group(4))
+            if m_imm.group(1): return 'imm_hex', int(m_imm.group(1), 16)
+            elif m_imm.group(2): return 'imm_bin', int(m_imm.group(2), 2)
+            elif m_imm.group(3): return 'imm_dec', int(m_imm.group(3))
+            elif m_imm.group(4): return 'imm_char', ord(m_imm.group(4))
             return 'error', "Invalid immediate format"
 
-        # İndeksli Değerler (offset,X)
+        # 2. İndeksli Değerler (,X ile biter)
         m_idx = self.idx_regex.match(operand_str)
         if m_idx:
             offset_val = None
-            if m_idx.group(1): # Hex offset
-                offset_val = int(m_idx.group(1), 16)
-            elif m_idx.group(2): # Decimal offset
-                offset_val = int(m_idx.group(2))
-
+            if m_idx.group(1): offset_val = int(m_idx.group(1), 16) # Hex offset
+            elif m_idx.group(2): offset_val = int(m_idx.group(2))   # Decimal offset
             if offset_val is not None and 0 <= offset_val <= 255:
                 return 'indexed', offset_val
             else:
                 return 'error', f"Invalid or out-of-range indexed offset: {operand_str}"
 
-        # Adres veya Etiket
-        m_addr = self.addr_label_regex.match(operand_str)
-        if m_addr:
-            if m_addr.group(1): # Hex adres ($xxxx veya $xx)
-                hex_val = m_addr.group(1)
-                val = int(hex_val, 16)
-                if len(hex_val) <= 2 and 0 <= val <= 0xFF: # Direct candidate
-                    return 'address_direct_hex', val
-                elif 0 <= val <= 0xFFFF: # Extended candidate
-                    return 'address_extended_hex', val
-                else:
-                    return 'error', f"Hex address out of range: {operand_str}"
-            elif m_addr.group(2): # Etiket
-                return 'label', m_addr.group(2).upper()
-            return 'error', "Invalid address/label format"
+        # 3. Hex Adres ($ ile başlar)
+        m_hex_addr = self.hex_addr_regex.match(operand_str)
+        if m_hex_addr:
+            hex_val_str = m_hex_addr.group(1)
+            val = int(hex_val_str, 16)
+            # Adres aralığına göre direct/extended ayrımı CodeGenerator'da yapılmalı.
+            # Şimdilik sadece hex adres olduğunu belirtelim.
+            # if len(hex_val_str) <= 2 and 0 <= val <= 0xFF: return 'address_direct_hex', val
+            # elif 0 <= val <= 0xFFFF: return 'address_extended_hex', val
+            if 0 <= val <= 0xFFFF: return 'hex_address', val # Genel hex adres tipi
+            else: return 'error', f"Hex address out of 16-bit range: {operand_str}"
 
-        return 'unknown', operand_str # Tanımlanamayan format
+        # 4. Düz Decimal Sayı (Sadece rakamlardan oluşuyorsa)
+        m_dec_num = self.dec_num_regex.match(operand_str)
+        if m_dec_num:
+            val = int(m_dec_num.group(1))
+            # Komutlar için bu adres olabilir, direktifler için sayı.
+            return 'decimal_value', val
+
+        # 5. Etiket (Diğerlerine uymuyorsa ve geçerli etiket formatındaysa)
+        m_label = self.label_regex.match(operand_str)
+        if m_label:
+            return 'label', m_label.group(1).upper()
+
+        return 'unknown', operand_str # Hiçbirine uymadıysa
 
     def _parse_operands_string(self, operands_raw_str):
-        """
-        Ham operand string'ini (virgülle ayrılmış olabilir) [(type, value), ...] listesine çevirir.
-        """
-        parsed_ops = []
+        """Ham operand string'ini [(type, value), ...] listesine çevirir."""
+        parsed_ops_list_of_tuples = []
         if not operands_raw_str:
-            return parsed_ops
-
-        # FCB, FDB gibi direktifler birden fazla, virgülle ayrılmış değer alabilir
-        # Şimdilik basitçe tek operandı veya virgülle ayrılmış listeyi varsayıyoruz
-        # M6800'de çoğu komut en fazla 1 operand alır (JSR/JMP hariç, o da tek adres).
-        # FCB, FDB özel durum.
-        # Şimdilik sadece tek bir operandı ayrıştırmaya odaklanalım.
-        # Birden fazla operand alan komutlar için bu kısım geliştirilmeli.
-
-        # Basitçe, virgülle ayrılmışsa ilkini alalım veya özel direktifleri düşünelim.
-        # Bu kısım, direktiflere göre daha akıllı olmalı.
-        # Şimdilik tek operand veya ilk operandı alıyoruz.
-        # M6800'de A,X veya B,X gibi operandlar yok. Sadece OFFSET,X var.
+            return parsed_ops_list_of_tuples
 
         op_parts = [op.strip() for op in self.value_list_regex.split(operands_raw_str) if op.strip()]
 
         for op_str in op_parts:
             op_type, op_value = self._parse_operand_value(op_str)
             if op_type == 'error':
-                return [('error', op_value)] # Hata varsa hemen dön
-            parsed_ops.append((op_type, op_value))
-        return parsed_ops
+                # Hata varsa, hatalı değeri ve mesajı içeren tek bir tuple döndür.
+                return [('error', op_value)]
+            parsed_ops_list_of_tuples.append((op_type, op_value))
+        return parsed_ops_list_of_tuples
 
 
     def parse_token(self, token: Token):
-        """
-        LexicalAnalyzer'dan gelen tek bir Token'ı analiz eder.
-        ParsedInstruction nesnesi döndürür.
-        """
-        if not token.mnemonic: # Etiket veya yorum satırı, mnemonik yok
-            if token.label and not token.comment and not token.operands_raw_str: # Sadece etiket var, başka bir şey yok
-                return ParsedInstruction(token, mnemonic=None) # Geçerli, sadece etiket
-            elif token.comment: # Yorum satırıysa veya etiketli yorumsa
-                 return ParsedInstruction(token, mnemonic=None) # Geçerli
+        if not token.mnemonic:
+            if token.label and not token.comment and not token.operands_raw_str:
+                return ParsedInstruction(token, mnemonic=None)
+            elif token.comment:
+                return ParsedInstruction(token, mnemonic=None)
             return ParsedInstruction(token, error="Missing mnemonic/directive.")
-
 
         mnemonic = token.mnemonic.upper()
         op_info_instr = self.opcode_table.get_instruction_info(mnemonic)
         op_info_pseudo = self.opcode_table.get_pseudo_op_info(mnemonic)
 
         if op_info_instr: # Bu bir M6800 komutu
-            parsed_ops_list = self._parse_operands_string(token.operands_raw_str)
-            if parsed_ops_list and parsed_ops_list[0][0] == 'error':
-                return ParsedInstruction(token, mnemonic=mnemonic, error=f"Invalid operand format: {parsed_ops_list[0][1]}")
+            parsed_ops_tuples = self._parse_operands_string(token.operands_raw_str)
 
-            # Adresleme modunu belirle
+            if parsed_ops_tuples and parsed_ops_tuples[0][0] == 'error':
+                return ParsedInstruction(token, mnemonic=mnemonic, error=f"Operand error: {parsed_ops_tuples[0][1]}")
+
             addressing_mode = None
-            final_operands_for_instr = []
-
-            # 1. Implied Modu
-            if MODE_IMPLIED in op_info_instr:
-                if not token.operands_raw_str: # Operand yoksa implied olabilir
-                    addressing_mode = MODE_IMPLIED
-                # Bazı implied komutlar (ASLA, ROLA) operand almaz ama token.operands_raw_str dolu olabilir (yorum vs).
-                # Bu yüzden önce op_info_instr[MODE_IMPLIED] var mı diye bakmak daha doğru.
-                # Eğer komut sadece Implied ise ve operand varsa bu bir hatadır.
-                elif not parsed_ops_list: # Token.operands_raw_str dolu ama parse edilemediyse (sadece yorum gibi)
-                    addressing_mode = MODE_IMPLIED
-
-
-            # 2. Diğer Modlar (Operandlara göre)
-            if not addressing_mode and parsed_ops_list:
-                op_type, op_value = parsed_ops_list[0] # Şimdilik ilk operandı alıyoruz
+            # Komutlar genellikle tek operand alır veya implied'dır.
+            # ParsedInstruction.operands sadece çözümlenmiş değeri (veya etiket adını) tutacak.
+            final_operand_value = None
+            if parsed_ops_tuples:
+                final_operand_value = parsed_ops_tuples[0][1] # İlk operandın değeri
+                op_type = parsed_ops_tuples[0][0]
 
                 if op_type.startswith('imm_') and MODE_IMMEDIATE in op_info_instr:
                     addressing_mode = MODE_IMMEDIATE
-                    final_operands_for_instr = [op_value] # Sadece değeri sakla
                 elif op_type == 'indexed' and MODE_INDEXED in op_info_instr:
                     addressing_mode = MODE_INDEXED
-                    final_operands_for_instr = [op_value] # Sadece offset'i sakla
                 elif op_type == 'label':
-                    # Etiket hem Direct/Extended (adres) hem de Relative (offset) için olabilir.
-                    # Öncelik Relative (branch komutları)
-                    if MODE_RELATIVE in op_info_instr:
-                        addressing_mode = MODE_RELATIVE
-                        final_operands_for_instr = [op_value] # Etiket adı
-                    elif MODE_EXTENDED in op_info_instr: # Extended genellikle Direct'ten sonra gelir
-                        addressing_mode = MODE_EXTENDED # Geçici olarak Extended, Pass 1 sonrası Direct'e düşebilir
-                        final_operands_for_instr = [op_value]
-                    elif MODE_DIRECT in op_info_instr:
-                        addressing_mode = MODE_DIRECT
-                        final_operands_for_instr = [op_value]
-                    else:
-                         return ParsedInstruction(token, mnemonic=mnemonic, op_info=op_info_instr,
-                                                 error=f"Label '{op_value}' used with instruction '{mnemonic}' that does not support label addressing.")
-                elif op_type == 'address_direct_hex':
-                    if MODE_DIRECT in op_info_instr:
-                        addressing_mode = MODE_DIRECT
-                        final_operands_for_instr = [op_value]
-                    elif MODE_EXTENDED in op_info_instr: # Direct yoksa Extended olabilir
-                        addressing_mode = MODE_EXTENDED
-                        final_operands_for_instr = [op_value]
-                    else:
-                        return ParsedInstruction(token, mnemonic=mnemonic, op_info=op_info_instr,
-                                                 error=f"Direct address used with instruction '{mnemonic}' that does not support it.")
-                elif op_type == 'address_extended_hex':
-                    if MODE_EXTENDED in op_info_instr:
-                        addressing_mode = MODE_EXTENDED
-                        final_operands_for_instr = [op_value]
-                    else:
-                        return ParsedInstruction(token, mnemonic=mnemonic, op_info=op_info_instr,
-                                                 error=f"Extended address used with instruction '{mnemonic}' that does not support it.")
+                    if MODE_RELATIVE in op_info_instr: addressing_mode = MODE_RELATIVE
+                    # Etiket direct/extended için olabilir. Bu ayrım Pass2/CodeGen'de yapılır.
+                    # Şimdilik komutun bu tür adreslemeyi desteklediğini varsayalım.
+                    elif MODE_EXTENDED in op_info_instr: addressing_mode = MODE_EXTENDED
+                    elif MODE_DIRECT in op_info_instr: addressing_mode = MODE_DIRECT
+                    else: return ParsedInstruction(token, mnemonic=mnemonic, error=f"Label operand not supported by {mnemonic}")
+                elif op_type == 'hex_address' or op_type == 'decimal_value': # $XXXX or DDDD
+                    # Adresin direct mi extended mı olduğuna Pass2/CodeGen karar verir.
+                    # Komutun bu tür adreslemeyi desteklediğini kontrol et.
+                    if MODE_EXTENDED in op_info_instr: addressing_mode = MODE_EXTENDED
+                    elif MODE_DIRECT in op_info_instr: addressing_mode = MODE_DIRECT
+                    else: return ParsedInstruction(token, mnemonic=mnemonic, error=f"Numeric address not supported by {mnemonic}")
+                # Diğer op_type'lar için hata
+                elif addressing_mode is None : # Eşleşen mod yoksa
+                     return ParsedInstruction(token, mnemonic=mnemonic, error=f"Invalid operand type '{op_type}' for {mnemonic}")
 
-            # Eğer operand yoksa ve Implied modu varsa ve başka mod yoksa
-            if not parsed_ops_list and not token.operands_raw_str and MODE_IMPLIED in op_info_instr:
+
+            elif MODE_IMPLIED in op_info_instr: # Operand yoksa ve Implied destekleniyorsa
                 addressing_mode = MODE_IMPLIED
-
+            # Hiç operand yoksa ama komut Implied değilse hata (aşağıda)
 
             if addressing_mode:
-                # Seçilen adresleme modu için opkod bilgilerini al
                 mode_specific_op_info = op_info_instr.get(addressing_mode)
                 if mode_specific_op_info:
                     return ParsedInstruction(token, mnemonic=mnemonic, addressing_mode=addressing_mode,
-                                             operands=final_operands_for_instr, op_info=mode_specific_op_info)
-                else:
-                    return ParsedInstruction(token, mnemonic=mnemonic,
-                                             error=f"Internal error: Mode '{addressing_mode}' not found for '{mnemonic}'.")
+                                             operands=[final_operand_value] if final_operand_value is not None else [],
+                                             op_info=mode_specific_op_info)
+                else: # Bu olmamalı, adresleme modu op_info_instr'da olmalı
+                    return ParsedInstruction(token, mnemonic=mnemonic, error=f"Internal: Mode '{addressing_mode}' inconsistent for '{mnemonic}'.")
             else:
-                # Uygun adresleme modu bulunamadı
                 expected_modes = ", ".join(op_info_instr.keys())
                 return ParsedInstruction(token, mnemonic=mnemonic, op_info=op_info_instr,
-                                         error=f"Invalid or missing operands for '{mnemonic}'. Expected modes: {expected_modes}. Got: '{token.operands_raw_str or 'None'}'")
+                                         error=f"Invalid/missing operands for '{mnemonic}'. Expected: {expected_modes}. Got: '{token.operands_raw_str or 'None'}'")
 
         elif op_info_pseudo: # Bu bir assembler direktifi
-            # Direktifler için operand ayrıştırma daha spesifik olabilir
-            # Örn: ORG $1000, FCB $10, $20, LABEL EQU $05
-            directive_operands = []
+            directive_operands = [] # Direktifler için operandlar değer listesi olarak saklanacak
             error_msg = None
-
+            op_parts_tuples = []
             if token.operands_raw_str:
-                op_parts = [op.strip() for op in self.value_list_regex.split(token.operands_raw_str) if op.strip()]
-                if mnemonic == 'EQU' and token.label: # LABEL EQU VALUE
-                    if len(op_parts) == 1:
-                        val_type, val = self._parse_operand_value(op_parts[0])
-                        if val_type not in ['error', 'unknown', 'indexed']: # EQU değeri adres veya sayı olabilir
-                            directive_operands.append(val)
+                op_parts_tuples = self._parse_operands_string(token.operands_raw_str)
+                if op_parts_tuples and op_parts_tuples[0][0] == 'error':
+                    return ParsedInstruction(token, is_directive=True, mnemonic=mnemonic, op_info=op_info_pseudo, error=f"Operand error: {op_parts_tuples[0][1]}")
+
+            # Direktiflere özel operand işleme
+            if mnemonic == 'EQU':
+                if token.label and len(op_parts_tuples) == 1:
+                    op_type, op_val = op_parts_tuples[0]
+                    if op_type not in ['error', 'unknown', 'indexed']: # EQU sayı, hex adres, etiket alabilir
+                        directive_operands.append(op_val)
+                    else: error_msg = f"Invalid value for EQU: type '{op_type}' for '{op_val}'"
+                else: error_msg = "EQU directive requires a label and exactly one value operand."
+            elif mnemonic in ['FCB', 'FDB']:
+                for op_type, op_val in op_parts_tuples:
+                    if op_type.startswith('imm_') or op_type == 'hex_address' or op_type == 'decimal_value' or op_type == 'label':
+                        directive_operands.append(op_val)
+                    else: error_msg = f"Invalid value type '{op_type}' for {mnemonic} operand '{op_val}'"; break
+            elif mnemonic == 'RMB' or mnemonic == 'ORG':
+                if len(op_parts_tuples) == 1:
+                    op_type, op_val = op_parts_tuples[0]
+                    if op_type == 'decimal_value' or op_type == 'hex_address' or op_type == 'label':
+                        if op_type == 'decimal_value' and not (isinstance(op_val, int) and op_val >=0):
+                             error_msg = f"{mnemonic} expects a non-negative integer, got '{op_val}'"
                         else:
-                            error_msg = f"Invalid value for EQU directive: {op_parts[0]}"
-                    else:
-                        error_msg = f"EQU directive expects 1 value, got {len(op_parts)}"
-                elif mnemonic in ['FCB', 'FDB']:
-                    for part in op_parts:
-                        val_type, val = self._parse_operand_value(part)
-                        # FCB/FDB hem sayı hem de karakter (# 'C') alabilir
-                        if val_type.startswith('imm_') or val_type.startswith('address_') or val_type == 'label':
-                            directive_operands.append(val) # Değerleri direkt sakla
-                        elif val_type == 'error':
-                            error_msg = f"Invalid value '{part}' in {mnemonic}: {val}"
-                            break
-                        else: # 'unknown' veya 'indexed' gibi geçersiz
-                            error_msg = f"Invalid value type '{val_type}' for {mnemonic}: {part}"
-                            break
-                elif mnemonic == 'ORG' or mnemonic == 'RMB':
-                    if len(op_parts) == 1:
-                        val_type, val = self._parse_operand_value(op_parts[0])
-                        if val_type.startswith('address_') or val_type == 'label' or val_type.endswith('_hex') or val_type.endswith('_dec'): # ORG/RMB sayı veya etiket alabilir
-                             directive_operands.append(val)
-                        elif val_type == 'error':
-                            error_msg = f"Invalid value for {mnemonic}: {val}"
-                        else:
-                            error_msg = f"Invalid value type '{val_type}' for {mnemonic}: {op_parts[0]}"
-                    else:
-                        error_msg = f"{mnemonic} directive expects 1 argument, got {len(op_parts)}"
-                elif mnemonic == 'END':
-                    if op_parts: # END normalde operand almaz (opsiyonel başlangıç adresi olabilir ama onu şimdilik desteklemiyoruz)
-                        error_msg = "END directive does not take arguments in this implementation."
-                else: # Diğer direktifler için genel ayrıştırma
-                    for part in op_parts:
-                         directive_operands.append(self._parse_operand_value(part)[1]) # Sadece değeri al
-            elif mnemonic not in ['END']: # END hariç diğer direktifler operand bekleyebilir
-                # ORG, EQU, FCB, FDB, RMB operand bekler
-                if op_info_pseudo.get('params', 0) != 0 and op_info_pseudo.get('params') != '1_or_more':
-                    error_msg = f"Directive '{mnemonic}' expects operand(s)."
+                            directive_operands.append(op_val)
+                    else: error_msg = f"Invalid value type '{op_type}' for {mnemonic}: '{op_val}'"
+                else: error_msg = f"{mnemonic} directive expects 1 argument."
+            elif mnemonic == 'END':
+                if op_parts_tuples: error_msg = "END directive does not take arguments."
+            # Diğer direktifler eklenebilir
+
+            # Operand sayısı kontrolü
+            if not error_msg:
+                expected_params_info = op_info_pseudo.get('params', 0)
+                num_parsed_ops = len(directive_operands) # directive_operands artık sadece değerleri içeriyor
+
+                if isinstance(expected_params_info, int):
+                    if not (mnemonic == 'END' and num_parsed_ops == 0 and not token.operands_raw_str):
+                        if num_parsed_ops != expected_params_info:
+                            error_msg = f"Directive '{mnemonic}' expects {expected_params_info} operand(s), got {num_parsed_ops}."
+                elif expected_params_info == '1_or_more':
+                    if num_parsed_ops == 0 and token.operands_raw_str : # Operand vardı ama parse edilemediyse farklı, hiç yoksa farklı
+                         error_msg = f"Directive '{mnemonic}' expects at least 1 operand, but none were validly parsed."
+                    elif num_parsed_ops == 0 and not token.operands_raw_str:
+                         error_msg = f"Directive '{mnemonic}' expects at least 1 operand, none provided."
 
 
             if error_msg:
@@ -283,60 +225,33 @@ class SyntaxAnalyzer:
         else: # Ne komut ne de direktif
             return ParsedInstruction(token, error=f"Unknown mnemonic or directive: '{mnemonic}'")
 
-
     def parse_tokens(self, token_list):
-        """
-        Token listesini alır ve ParsedInstruction listesi döndürür.
-        """
         parsed_instructions = []
-        for token in token_list:
-            parsed_instructions.append(self.parse_token(token))
+        for token_obj in token_list: # token_obj olarak değiştirdim, token modülüyle karışmasın
+            parsed_instructions.append(self.parse_token(token_obj))
         return parsed_instructions
 
 
 # Test için örnek kullanım
 if __name__ == "__main__":
-    from .lexical_analyzer import LexicalAnalyzer # opcode_table'ı import etmeden önce lexer'ı import etmemiz lazım
-    # Python'da circular import olmaması için opcode_table'ı doğrudan import etmek yerine
-    # bir modül referansı olarak SyntaxAnalyzer'a constructor ile veriyoruz.
-    # Bu örnekte, opcode_table.py içindeki fonksiyonları kullanacağız.
-    import assembler.opcode_table as ot_module
+    from .lexical_analyzer import LexicalAnalyzer
+    import assembler.opcode_table as ot_module # opcode_table.py 'yi import et
 
     lexer = LexicalAnalyzer()
-    syntax_analyzer = SyntaxAnalyzer(ot_module)
+    syntax_analyzer = SyntaxAnalyzer(ot_module) # ot_module'ü constructor'a ver
 
     sample_code = """
     START EQU $1000
-    LOOP: LDAA #$05      ; Load A with 5
-          LDAB #%101
-          LDX  #150
-          ADDA #'$'      ; Add ASCII for $
-          ANDA DATA_VAL
-          DECA
-          BNE  LOOP
-          JMP  START
-    ADDR1 EQU  $20
-          CLR  $30,X     ; Clear memory at $30+X
-          LSR  $00F0     ; Logical Shift Right memory
-    VALS  FCB  $0A, %00000011, 255, #'Z'
-          FDB  $1234, LOOP
-          RMB  10
+    LOOP: LDAA #$05
+          RMB  1         ; Test RMB
           ORG  $C000
+          FCB  $0A, 20, %00010101, #'X', START
           END
-    DATA_VAL EQU $FF
-    ERROR_OP LDAA $GG ; Hatalı operand
-    NO_SUCH_CMD XYZ #10
+    BADRMB RMB BADVAL
     """
-
     print("--- Parsing Sample Code ---")
     tokens = lexer.tokenize_source_code(sample_code)
     parsed_instrs = syntax_analyzer.parse_tokens(tokens)
 
     for pi in parsed_instrs:
         print(pi)
-        if pi.error:
-            print(f"  ERROR on line {pi.token.line_number}: {pi.error}")
-        elif not pi.is_directive and pi.op_info:
-            print(f"  Opcode Info: Bytes={pi.op_info.get('bytes')}, Opcode=0x{pi.op_info.get('opcode',0):02X}")
-        elif pi.is_directive and pi.op_info:
-            print(f"  Directive Info: {pi.op_info.get('desc')}") 
