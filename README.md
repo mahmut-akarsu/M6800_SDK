@@ -1,4 +1,4 @@
-Paste your ri 
+
 
 # **Sistem Tasarımı**
 
@@ -45,7 +45,6 @@ ui/: Tkinter kullanılarak geliştirilen kullanıcı arayüzü bileşenlerini i�
 
 main.py: Uygulamanın ana giriş noktasıdır ve kullanıcı arayüzünü başlatır.
 
-(Editör Notu: Proje dosya hiyerarşisini gösteren bir ağaç diyagramı bu bölüme eklenebilir.)
 
 # Komut Seti Yönetimi (Instruction Set Handling)
 
@@ -130,8 +129,6 @@ Step: Tek bir M6800 komutunu yürütür.
 Stop: Sürekli çalışan simülasyonu durdurur.
 
 Reset CPU: Simülatör CPU'sunu başlangıç durumuna sıfırlar.
-
-(Editör Notu: Kontrol butonlarının yer aldığı bölümün bir ekran görüntüsü eklenmelidir.)
 
   
 
