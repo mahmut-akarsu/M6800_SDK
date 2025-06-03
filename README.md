@@ -1,82 +1,6 @@
 
 
-# **Sistem Tasarımı**
-
-**Geliştirilen SDK, modüler bir mimari üzerine kurulmuş olup temel olarak üç ana bileşenden oluşmaktadır: Assembler, Simülatör ve Kullanıcı Arayüzü. Bu bileşenler, görev ayrımı prensibine uygun olarak tasarlanmış ve Python programlama dili kullanılarak implemente edilmiştir.**
-
-##  **Assembler Mimarisi**
-
-**Assembler, M6800 assembly kaynak kodunu makine koduna (nesne kodu) çevirmekle görevlidir. Bu süreç  iki geçişli (two-pass) yaklaşımıyla gerçekleştirilmiştir. Bu yöntem forward referencesin etkin bir şekilde çözümlenmesine olanak tanır.**
-
-**Birinci Geçiş (Pass 1): Bu aşamada kaynak kod satır satır taranır. LexicalAnalyzer modülü tarafından her satır sözcüksel birimlere (token'lara: etiket, mnemonik, operand, yorum) ayrıştırılır. Ardından, SyntaxAnalyzer modülü bu token'ları alarak temel sözdizimi kontrollerini yapar ve ParsedInstruction nesneleri oluşturur.** 
-
-**En kritik görevlerden biri olan sembol tablosunun (SymbolTable) oluşturulması bu geçişte yapılır. Karşılaşılan her etiket, o anki Konum Sayacı (Location Counter - LC) değeri ile birlikte sembol tablosuna kaydedilir. LC, her komutun veya veri tanımlama direktifinin (örn: FCB, RMB) bellekte kaplayacağı byte sayısına göre güncellenir. ORG direktifi ile LC doğrudan ayarlanabilir. Bu geçişin sonunda, programdaki tüm etiketlerin adresleri belirlenmiş olur.**
-
-**İkinci Geçiş (Pass 2): Bu aşamada birinci geçişte oluşturulan ParsedInstruction listesi ve doldurulmuş sembol tablosu kullanılır. CodeGenerator modülü, her bir ParsedInstruction için makine kodunu üretir. Komut operandlarında yer alan etiketler, sembol tablosundan karşılık gelen adreslerle değiştirilir. Dallanma (branch) komutları için hedef etiket ile mevcut komut adresi arasındaki offset hesaplanır. Üretilen makine kodu byte dizisi ve her kaynak satırına karşılık gelen detayları içeren bir listing dosyası oluşturulur.**
-
-**  
-  
-
-![](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfvGov0YKYIyeORx7rirn7osmusOw2rfv_Kt_9YoPxQmenrhj-DfELUSU2xCFpoYXRodf86jHHt8-Me60naxprVh81VgWwk4EaEgSOpUJmfSWQUO3krtKJab-EpsgDcXmTjUeqi4g?key=cZKUb2HtPJWYIRwa8MP5gA)
-
-  
-
-## Simülatör Mimarisi
-
-Simülatör, assembler tarafından üretilen makine kodunu sanal bir M6800 CPU üzerinde yürüterek programın davranışının gözlemlenmesini sağlar.
-
-cpu.py: M6800 CPU'nun temel elemanlarını (Akümülatör A, Akümülatör B, Index Register X, Program Counter PC, Stack Pointer SP) ve Durum Kod Register'ını (CCR - H, I, N, Z, V, C flag'leri) simüle eder. Ayrıca, 64KB'lık bir bellek (Memory sınıfı) de bu modül içinde yönetilir. Bellek okuma, yazma ve program yükleme işlemleri bu sınıf üzerinden gerçekleştirilir.
-
-instruction\_executor.py: Her bir M6800 makine kodu komutunun CPU üzerindeki etkisini (register değerlerini değiştirme, bellek erişimi, CCR flag'lerini güncelleme) tanımlayan mantığı içerir. Okunan opkoda karşılık gelen yürütme fonksiyonunu bir dispatch tablosu aracılığıyla çağırır.
-
-simulator.py: Simülasyon sürecini yönetir. Nesne kodunu CPU belleğine yükler, CPU'yu başlangıç durumuna getirir (reset), komutların adım adım (step) veya sürekli (run) çalıştırılmasını sağlar. Breakpoint yönetimi ve UI ile iletişim için callback mekanizmalarını içerir.
-
-  
-
-## Modüler Yapı ve Dosya Organizasyonu
-
-Proje, sorumlulukların net bir şekilde ayrıldığı modüler bir dosya yapısına sahiptir:
-
-assembler/: Assembler ile ilgili tüm mantığı (lexical analiz, syntax analiz, kod üretimi, sembol tablosu, opkod tablosu) içerir.
-
-simulator/: CPU modeli, komut yürütme ve simülatör kontrolü gibi simülasyonla ilgili mantığı barındırır.
-
-ui/: Tkinter kullanılarak geliştirilen kullanıcı arayüzü bileşenlerini içerir.
-
-main.py: Uygulamanın ana giriş noktasıdır ve kullanıcı arayüzünü başlatır.
-
-
-# Komut Seti Yönetimi (Instruction Set Handling)
-
-M6800 komut setinin ve a pseudo-operation yönetimi, sistemin doğruluğu ve genişletilebilirliği açısından önem arz etmektedir.
-
-## Opcode Tablosu (opcode\_table.py)
-
-Tüm M6800 mnemonikleri, bu mnemoniklerin farklı adresleme modlarındaki opkodları, komutların byte uzunlukları, CPU döngü süreleri ve etkiledikleri CCR flag'leri merkezi bir Python sözlüğü (INSTRUCTION\_SET) içinde tanımlanmıştır.
-
-Her mnemonik için  desteklenen her adresleme modu (örn: MODE\_IMMEDIATE, MODE\_DIRECT, MODE\_EXTENDED, MODE\_INDEXED, MODE\_IMPLIED, MODE\_RELATIVE) ayrı bir alt sözlükte detaylandırılmıştır. Bu detaylar, 'opcode', 'bytes', 'cycles', 'flags\_affected' gibi anahtarlarla saklanır.
-
-Benzer şekilde, assembler direktifleri (ORG, EQU, FCB, FDB, RMB, END) de 'PSEUDO\_OPS' adlı bir sözlükte, bekledikleri parametre sayısı ve türü gibi bilgilerle tanımlanmıştır.
-
-## Komutların İşlenmesi
-
-Assembler Tarafında
-
-LexicalAnalyzer, kaynak koddaki mnemonik string'ini ayıklar. SyntaxAnalyzer, bu mnemonik string'ini kullanarak opcode\_table.py'den ilgili komutun tanımını alır. Kaynak koddaki operandlara bakarak, opcode\_table'da tanımlı olan ve operandlarla eşleşen geçerli adresleme modunu belirler. Bu moda özgü opcode ve byte sayısı gibi bilgiler ParsedInstruction nesnesine kaydedilir.
-
-CodeGenerator, ParsedInstruction'daki opcode ve çözümlenmiş operandları kullanarak makine kodunu üretir.
-
-  
-
-Simülatör Tarafında
-
-InstructionExecutor, bellekten okuduğu opcodeyi alır. Bu opcode’a karşılık gelen mnemonik, adresleme modu ve diğer statik bilgileri (döngü sayısı, etkilenecek flag'ler) yine opcode\_table.py'deki INSTRUCTION\_SET üzerinden bulur (veya dispatch\_table aracılığıyla önceden eşleştirilmiş handler fonksiyonunu çağırır).
-
-Her komut için özel olarak yazılmış \_execute\_MNEMONIC metodunda, komutun CPU üzerindeki etkisi (register değişiklikleri, bellek işlemleri) ve flag güncellemeleri, opcode\_table'dan alınan bu statik bilgilere ve komutun kendi mantığına göre gerçekleştirilir.
-
 # Kullanıcı Arayüzü
-
-Kullanıcı arayüzü, Python'un GUI kütüphanesi olan Tkinter kullanılarak geliştirilmiştir.
 
 ## Ana Pencere Düzeni
 
@@ -159,4 +83,3 @@ Durum Çubuğu (Status Bar): Uygulamanın en altında yer alır ve kullanıcıya
 ![](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcOQBQAJ4TZu00OpaMvif6_v5KQGIMngTl3C1GbOID24xXVARsWw6VGciCNxH7UeQCsfpbTN0e2jQQUVCuOk-XdXBxtEQS4LuRVfHFAk6vqjCOK96H7xbl96YFwqfPOAkC8HrbTvA?key=cZKUb2HtPJWYIRwa8MP5gA)
 
   
-**ch text content here. You can paste directly from Word or other rich text sources.
